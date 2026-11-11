@@ -1,0 +1,22 @@
+{
+  "github_token": "",
+  "trending_languages": ["", "python", "typescript", "rust", "go"],
+  "trending_limit": 30,
+
+  "new_star_days": 30,
+  "new_star_min_stars": 300,
+  "new_star_limit": 20,
+
+  "release_window_hours": 36,
+  "release_min_stars": 3000,
+  "release_include_patch": false,
+  "release_limit": 25,
+  "watchlist": [],
+
+  "accel_min_stars": 1000,
+  "accel_limit": 15,
+
+  "exclude_keywords": [],
+  "notify": true,
+  "open_report": false
+}
