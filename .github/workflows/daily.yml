@@ -1,0 +1,42 @@
+name: GitHub 雷达抓取
+
+# 组合方案：这里只负责抓数据，把报告提交回仓库；
+# 北京时间 09:00 由 Claude 云端任务读取 reports/<日期>.md，写中文精选日报并推送到手机。
+
+on:
+  schedule:
+    - cron: "0 0 * * *"   # UTC 00:00 = 北京时间 08:00（GitHub 定时可能延迟几分钟到半小时，留出余量）
+  workflow_dispatch:       # 允许在网页上手动点“Run workflow”
+
+permissions:
+  contents: write          # 把日报和历史快照提交回仓库
+
+concurrency:
+  group: radar
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 抓取并生成报告
+        env:
+          TZ: Asia/Shanghai
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python ghradar.py --no-notify
+
+      - name: 提交报告和星标快照
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f reports data/history.sqlite
+          git commit -m "日报 $(TZ=Asia/Shanghai date +%F)" || echo "没有变化"
+          git pull --rebase
+          git push
