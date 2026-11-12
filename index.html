@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>GitHub 雷达 · 每日榜单讲解</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #1d2127; --muted: #66707c;
+    --line: #e3e6ea; --accent: #2563eb; --chip: #eef1f5; --warn-bg: #fff6e5;
+    --warn-text: #8a5300; --hot: #e5484d; --new: #2f9e44;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --card: #181b21; --text: #e6e8eb; --muted: #9aa3ad;
+      --line: #2a2f37; --accent: #6ea8fe; --chip: #232830; --warn-bg: #2d2412;
+      --warn-text: #f3c26b; --hot: #ff6b6f; --new: #51cf66;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.65 -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB",
+          "Microsoft YaHei", "Segoe UI", sans-serif;
+    -webkit-text-size-adjust: 100%;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 0 16px 48px; }
+  header {
+    position: sticky; top: 0; z-index: 10; background: var(--bg);
+    padding: 14px 0 10px; border-bottom: 1px solid var(--line);
+  }
+  .top { display: flex; align-items: center; gap: 10px; }
+  h1 { font-size: 20px; margin: 0; flex: 1; white-space: nowrap; }
+  .datebar { display: flex; align-items: center; gap: 6px; }
+  button, select {
+    font: inherit; font-size: 14px; color: var(--text); background: var(--card);
+    border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; cursor: pointer;
+  }
+  button:disabled { opacity: .35; cursor: default; }
+  .tabs { display: flex; gap: 8px; margin-top: 10px; }
+  .tab {
+    flex: 1; text-align: center; padding: 8px 0; border-radius: 10px; font-weight: 600;
+    background: var(--chip); color: var(--muted); border: none; font-size: 15px;
+  }
+  .tab.on { background: var(--accent); color: #fff; }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+    padding: 14px 16px; margin-top: 12px;
+  }
+  .head { display: flex; gap: 10px; align-items: baseline; }
+  .rank {
+    flex: none; min-width: 28px; height: 28px; border-radius: 8px; display: inline-flex;
+    align-items: center; justify-content: center; font-weight: 700; font-size: 14px;
+    background: var(--chip); color: var(--muted);
+  }
+  .sec-hot .rank.top { background: var(--hot); color: #fff; }
+  .sec-new .rank.top { background: var(--new); color: #fff; }
+  .name { font-weight: 700; font-size: 17px; word-break: break-all; }
+  .meta { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 4px; }
+  .chip {
+    font-size: 12.5px; padding: 2px 8px; border-radius: 999px; background: var(--chip);
+    color: var(--muted); white-space: nowrap;
+  }
+  .row { margin-top: 6px; }
+  .label { font-weight: 700; margin-right: 4px; }
+  .warn {
+    margin-top: 8px; padding: 8px 10px; border-radius: 8px; background: var(--warn-bg);
+    color: var(--warn-text); font-size: 14.5px;
+  }
+  .note { color: var(--muted); font-size: 14px; margin-top: 14px; }
+  .empty { text-align: center; color: var(--muted); padding: 60px 0; }
+  code { font-size: 13px; background: var(--chip); padding: 1px 5px; border-radius: 4px; }
+  footer { margin-top: 28px; font-size: 13.5px; color: var(--muted); text-align: center; }
+  footer a { margin: 0 6px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="top">
+      <h1>📡 GitHub 雷达</h1>
+      <div class="datebar">
+        <button id="prev" title="前一天">‹</button>
+        <select id="date"></select>
+        <button id="next" title="后一天">›</button>
+      </div>
+    </div>
+    <div class="tabs" id="tabs"></div>
+  </header>
+  <main id="main"><div class="empty">加载中…</div></main>
+  <footer id="foot"></footer>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let dates = [], current = "", sections = [], activeTab = 0;
+
+function esc(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+function inline(s) {
+  let h = esc(s);
+  h = h.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  h = h.replace(/(^|[\s（(：:])(https?:\/\/[^\s<）)]+)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
+  h = h.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  h = h.replace(/`([^`]+)`/g, "<code>$1</code>");
+  return h;
+}
+
+// 把 Markdown 日报解析成 [{title, items:[{rank,name,url,meta[],rows[],warns[]}], notes:[]}]
+function parse(md) {
+  const out = [], tail = [];
+  let sec = null, item = null;
+  const headRe = /^\*\*(\d+)\.\s*\[([^\]]+)\]\(([^)]+)\)\*\*\s*(.*)$/;
+  for (const raw of md.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || /^#\s/.test(line)) continue;
+    if (/^##\s/.test(line)) {
+      sec = { title: line.replace(/^##\s*/, ""), items: [], notes: [] };
+      out.push(sec); item = null; continue;
+    }
+    const m = line.match(headRe);
+    if (m && sec) {
+      const meta = m[4].replace(/^·\s*/, "").split(/\s*·\s*/).filter(Boolean);
+      item = { rank: +m[1], name: m[2], url: m[3], meta, rows: [], warns: [] };
+      sec.items.push(item); continue;
+    }
+    if (/^[-*]\s/.test(line) && item) {
+      let text = line.replace(/^[-*]\s*/, "");
+      const w = text.indexOf("⚠️");
+      if (w > 0) { item.warns.push(text.slice(w)); text = text.slice(0, w).trim(); }
+      if (/^⚠️/.test(text)) item.warns.push(text); else item.rows.push(text);
+      continue;
+    }
+    if (/^⚠️/.test(line) && item) { item.warns.push(line); continue; }
+    (sec ? sec.notes : tail).push(line);
+    item = null;
+  }
+  return { secs: out.filter(s => s.items.length || s.notes.length), tail };
+}
+
+function renderItem(it, cls) {
+  const rows = it.rows.map(r => {
+    const m = r.match(/^(简介|作用)[：:]\s*(.*)$/);
+    return m ? `<div class="row"><span class="label">${m[1]}</span>${inline(m[2])}</div>`
+             : `<div class="row">${inline(r)}</div>`;
+  }).join("");
+  const warns = it.warns.map(w => `<div class="warn">${inline(w)}</div>`).join("");
+  return `<div class="card ${cls}">
+    <div class="head"><span class="rank ${it.rank <= 3 ? "top" : ""}">${it.rank}</span>
+      <a class="name" href="${esc(it.url)}" target="_blank" rel="noopener">${esc(it.name)}</a></div>
+    <div class="meta">${it.meta.map(x => `<span class="chip">${inline(x)}</span>`).join("")}</div>
+    ${rows}${warns}</div>`;
+}
+
+function render() {
+  const tabs = $("tabs"), main = $("main");
+  if (!sections.length) { tabs.innerHTML = ""; main.innerHTML = '<div class="empty">这一天没有内容</div>'; return; }
+  tabs.innerHTML = sections.map((s, i) =>
+    `<button class="tab ${i === activeTab ? "on" : ""}" data-i="${i}">${esc(s.title)}</button>`).join("");
+  tabs.querySelectorAll(".tab").forEach(b => b.onclick = () => {
+    activeTab = +b.dataset.i; render(); window.scrollTo({ top: 0 });
+  });
+  const s = sections[activeTab];
+  const cls = /新星|🌱/.test(s.title) ? "sec-new" : "sec-hot";
+  main.innerHTML = s.items.map(it => renderItem(it, cls)).join("") +
+    s.notes.filter(n => !/完整报告/.test(n)).map(n => `<div class="note">${inline(n)}</div>`).join("");
+}
+
+async function load(d) {
+  current = d; $("date").value = d;
+  const i = dates.indexOf(d);
+  $("prev").disabled = i >= dates.length - 1; $("next").disabled = i <= 0;
+  history.replaceState(null, "", "#" + d);
+  $("main").innerHTML = '<div class="empty">加载中…</div>';
+  try {
+    const r = await fetch(`digests/${d}.md`, { cache: "no-cache" });
+    if (!r.ok) throw new Error(r.status);
+    const { secs, tail } = parse(await r.text());
+    sections = secs; activeTab = Math.min(activeTab, Math.max(secs.length - 1, 0));
+    render();
+    $("foot").innerHTML =
+      tail.filter(t => !/完整报告/.test(t)).map(t => `<div>${inline(t)}</div>`).join("") +
+      `<div style="margin-top:8px"><a href="reports/${d}.html" target="_blank">完整原始报告</a>·` +
+      `<a href="https://github.com/7913021cs-ai/gh-radar" target="_blank">项目仓库</a></div>`;
+  } catch (e) {
+    sections = []; $("tabs").innerHTML = "";
+    $("main").innerHTML = `<div class="empty">${d} 的日报还没有生成</div>`;
+  }
+}
+
+async function init() {
+  try {
+    const r = await fetch("digests/index.json", { cache: "no-cache" });
+    dates = (await r.json()).sort().reverse();
+  } catch (e) { dates = []; }
+  if (!dates.length) { $("main").innerHTML = '<div class="empty">还没有日报，每天北京时间 9 点更新</div>'; return; }
+  $("date").innerHTML = dates.map(d => `<option value="${d}">${d}</option>`).join("");
+  $("date").onchange = (e) => load(e.target.value);
+  $("prev").onclick = () => load(dates[dates.indexOf(current) + 1]);
+  $("next").onclick = () => load(dates[dates.indexOf(current) - 1]);
+  const want = location.hash.slice(1);
+  load(dates.includes(want) ? want : dates[0]);
+}
+init();
+</script>
+</body>
+</html>
