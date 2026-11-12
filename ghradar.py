@@ -20,7 +20,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import TimeoutError as FuturesTimeout
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 REPORTS = os.path.join(ROOT, "reports")
@@ -37,7 +38,8 @@ def log(*a):
 
 # ---------------------------------------------------------------- HTTP
 
-def http_get(url: str, token: str = "", accept: str = "", retries: int = 3) -> str:
+def http_get(url: str, token: str = "", accept: str = "", retries: int = 3,
+             timeout: int = 20) -> str:
     headers = {"User-Agent": UA}
     if accept:
         headers["Accept"] = accept
@@ -47,14 +49,14 @@ def http_get(url: str, token: str = "", accept: str = "", retries: int = 3) -> s
     for i in range(retries):
         try:
             req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=30) as r:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
                 return r.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as e:
             last = e
             if e.code == 404:
                 raise
             if e.code in (403, 429):  # 限流：等一会儿再试
-                wait = 20 * (i + 1)
+                wait = 10 * (i + 1)
                 reset = e.headers.get("x-ratelimit-reset")
                 if reset and e.headers.get("x-ratelimit-remaining") == "0":
                     wait = max(1, min(70, int(reset) - int(time.time()) + 1))
@@ -174,7 +176,7 @@ def strip_html(s: str, n: int = 260) -> str:
 def fetch_release(repo: str, window_h: int) -> dict | None:
     """读 releases.atom（不占 API 限额），返回窗口期内最新的正式版。"""
     try:
-        xml = http_get(f"https://github.com/{repo}/releases.atom", retries=2)
+        xml = http_get(f"https://github.com/{repo}/releases.atom", retries=1, timeout=10)
         root = ET.fromstring(xml)
     except Exception:
         return None
@@ -306,11 +308,25 @@ def excluded(r: dict, kws: list[str]) -> bool:
     return any(k.lower() in text for k in kws)
 
 
+def reachable(url: str) -> bool:
+    try:
+        http_get(url, retries=1, timeout=10)
+        return True
+    except Exception as e:
+        log(f"连不上 {url}: {e}")
+        return False
+
+
 def collect(cfg: dict) -> dict:
     token = cfg["github_token"]
     kws = cfg.get("exclude_keywords", [])
     all_repos: dict[str, dict] = {}
     errors = []
+    # 先探测网络：github.com 网页不通时跳过 Trending 和 release 检查，避免每个请求都等到超时
+    web_ok = reachable("https://github.com/trending")
+    log(f"网络检测：github.com 网页 {'可用' if web_ok else '不可用'}")
+    if not web_ok:
+        errors.append("github.com 网页无法访问，跳过了今日飙升和版本更新")
 
     def remember(r):
         cur = all_repos.get(r["repo"])
@@ -324,7 +340,7 @@ def collect(cfg: dict) -> dict:
 
     # 1) Trending 今日
     trending: dict[str, dict] = {}
-    for lang in cfg.get("trending_languages", [""]):
+    for lang in (cfg.get("trending_languages", [""]) if web_ok else []):
         try:
             items = fetch_trending(lang, "daily")
             log(f"Trending[{lang or 'all'}] {len(items)} 个")
@@ -340,12 +356,13 @@ def collect(cfg: dict) -> dict:
                            reverse=True)[: cfg.get("trending_limit", 30)]
 
     weekly = []
-    try:
-        weekly = fetch_trending("", "weekly")
-        for it in weekly:
-            remember(it)
-    except Exception as e:
-        errors.append(f"Trending weekly: {e}")
+    if web_ok:
+        try:
+            weekly = fetch_trending("", "weekly")
+            for it in weekly:
+                remember(it)
+        except Exception as e:
+            errors.append(f"Trending weekly: {e}")
 
     # 2) 新星：近 N 天创建、星数最多
     since = (TODAY - dt.timedelta(days=cfg["new_star_days"])).isoformat()
@@ -386,11 +403,28 @@ def collect(cfg: dict) -> dict:
     for repo in cfg.get("watchlist", []):
         candidates.setdefault(repo, all_repos.get(repo) or
                               {"repo": repo, "url": f"https://github.com/{repo}", "stars": 0})
+    if not web_ok:
+        candidates = {}
     log(f"检查 {len(candidates)} 个项目的 release …")
 
     window = cfg["release_window_hours"]
-    with ThreadPoolExecutor(8) as ex:
-        rels = list(ex.map(lambda r: (r, fetch_release(r, window)), list(candidates)))
+    # 有时间预算：网络慢（例如云端共享出口被限速）时，到点就用已检查完的部分，不会一直卡住
+    budget = cfg.get("release_time_budget_sec", 300)
+    t0 = time.time()
+    rels = []
+    ex = ThreadPoolExecutor(8)
+    futs = {ex.submit(fetch_release, r, window): r for r in candidates}
+    try:
+        for i, fut in enumerate(as_completed(futs, timeout=budget), 1):
+            rels.append((futs[fut], fut.result()))
+            if i % 50 == 0:
+                log(f"  已检查 {i}/{len(futs)}（{time.time() - t0:.0f}s）")
+    except FuturesTimeout:
+        done_n = len(rels)
+        errors.append(f"release 检查超出 {budget}s 时间预算，只检查了 {done_n}/{len(futs)} 个项目")
+        log(f"release 检查超时，已完成 {done_n}/{len(futs)}")
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
     releases = []
     rank = {"major": 0, "minor": 1, "release": 2, "patch": 3, "backport": 4}
     for repo, rel in rels:
